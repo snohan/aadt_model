@@ -3,3 +3,7 @@
 .RData
 .Ruserdata
 archive/
+*.geojson
+*.Rproj
+*.csv
+nr_original/

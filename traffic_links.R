@@ -3,7 +3,7 @@ library(tidyverse)
 library(sf)
 library(sfnetworks)
 library(igraph)
-library(tidygraph)
+#library(tidygraph)
 
 source("H:/Programmering/R/byindeks/get_from_nvdb_api.R")
 source("H:/Programmering/R/byindeks/get_from_trafficdata_api.R")
@@ -94,36 +94,37 @@ links_chosen |>
   ggplot() +
   geom_sf(aes(col = length))
 
+# Smøla
 # Repair links without nodes
-union_hopen_veiholmen <-
-  links_chosen |>
-  dplyr::filter(
-    nvdb_id %in% c("1014386164", "1014386165")
-  ) |>
-  dplyr::summarise(
-    nvdb_id = max(nvdb_id),
-    length = sum(length),
-    start_node = min(start_node, na.rm = TRUE),
-    end_node = min(end_node, na.rm = TRUE),
-    functional_class_high = max(functional_class_high),
-    functional_class_low = min(functional_class_low),
-    ferry = any(ferry),
-    directions = min(directions),
-    road_category = min(road_category),
-    urban_ratio = mean(urban_ratio),
-    lanes_max = max(lanes_max),
-    lanes_min = min(lanes_min),
-    trp = max(trp),
-    speed_high = max(speed_high),
-    speed_low = min(speed_low)
-  )
+# union_hopen_veiholmen <-
+#   links_chosen |>
+#   dplyr::filter(
+#     nvdb_id %in% c("1014386164", "1014386165")
+#   ) |>
+#   dplyr::summarise(
+#     nvdb_id = max(nvdb_id),
+#     length = sum(length),
+#     start_node = min(start_node, na.rm = TRUE),
+#     end_node = min(end_node, na.rm = TRUE),
+#     functional_class_high = max(functional_class_high),
+#     functional_class_low = min(functional_class_low),
+#     ferry = any(ferry),
+#     directions = min(directions),
+#     road_category = min(road_category),
+#     urban_ratio = mean(urban_ratio),
+#     lanes_max = max(lanes_max),
+#     lanes_min = min(lanes_min),
+#     trp = max(trp),
+#     speed_high = max(speed_high),
+#     speed_low = min(speed_low)
+#   )
 
 links_chosen_tidy <-
   links_chosen |>
-  dplyr::filter(
-    !is.na(start_node),
-    !is.na(end_node)
-  ) |>
+  # dplyr::filter(
+  #   !is.na(start_node),
+  #   !is.na(end_node)
+  # ) |>
   #dplyr::bind_rows(
   #  union_hopen_veiholmen
   #) |>
@@ -144,17 +145,19 @@ links_chosen_tidy <-
   # But there are too many weird links that stay multiline
   # TODO: use most recent links (hopefully fewer errors)
   sf::st_line_merge() |>
-  sf::st_cast("LINESTRING")
-
-links_chosen_tidy_subset <-
-  links_chosen_tidy |>
+  sf::st_cast("LINESTRING") |>
+  # Removing problematic links
   dplyr::filter(
-    nvdb_id %in% c(
-      #"1014444142",
-      "1014444374",
-      "1014584217",
-      "1014444264"
-    )
+    !(nvdb_id %in% c(
+      "1014584167",
+      "1014584152",
+      "1014443825",
+      "1014444138",
+      "1014444137",
+      "1014584106",
+      "1014444324",
+      "1014444142"
+    ))
   )
 
 links_chosen_narrow <-
@@ -166,14 +169,13 @@ links_chosen_narrow <-
 # Nodes ----
 node_ids <-
   c(
-    links_chosen_tidy_subset$start_node,
-    links_chosen_tidy_subset$end_node
+    links_chosen_tidy$start_node,
+    links_chosen_tidy$end_node
   ) |>
-  base::unique()
+  base::unique() |>
+  base::sort()
 
-
-
-# TODO: reset node_ids in link subset
+# Reset node_ids in link subset
 node_id_reset <-
   tibble::tibble(
     id = node_ids
@@ -190,12 +192,14 @@ nodes_chosen <-
   dplyr::left_join(
     node_id_reset,
     by = "id"
-  )
+  ) |>
+  dplyr::arrange(node_id) |>
+  dplyr::relocate(node_id)
 
 # TODO: many missing nodes!
 
 ## Plot ----
-links_chosen_tidy_subset |>
+links_chosen_tidy |>
   ggplot() +
   geom_sf(aes(col = link_id)) +
   geom_sf(data = nodes_chosen)
@@ -304,15 +308,31 @@ links_directed <-
       TRUE ~ speed_high
     ),
     travel_time_minutes = length_km / speed * 60,
-    travel_time_normalized = travel_time_minutes / base::max(travel_time_minutes),
-    from = as.numeric(start_node),
-    to = as.numeric(end_node)
+    travel_time_normalized = travel_time_minutes / base::max(travel_time_minutes)
+    #from = as.numeric(start_node),
+    #to = as.numeric(end_node)
+  ) |>
+  dplyr::left_join(
+    node_id_reset,
+    by = c("start_node" = "id")
+  )  |>
+  dplyr::left_join(
+    node_id_reset,
+    by = c("end_node" = "id"),
+    suffix = c("", "_end")
   ) |>
   dplyr::select(
     -length,
     -trp,
     -start_node,
     -end_node
+  ) |>
+  dplyr::rename(
+    from = node_id,
+    to = node_id_end
+  ) |>
+  dplyr::relocate(
+    from, to
   )
 
 # Variables used further:
@@ -344,31 +364,39 @@ links_directed_id_aadt <-
 
 
 # Directed graph ----
-# TODO: need a node table which have a point geometry - now too many missing
 
 # Build directed graph object from nodes and spatially implicit edges
+# Implicit because there are gaps (roundabouts) which will give:
+# Error: Edge boundaries do not match their corresponding nodes
+# Therefore: edges_as_lines = FALSE,
+
 # The edges must contain columns 'from' and 'to'
+
 directed_graph <-
   sfnetworks::sfnetwork(
     nodes = nodes_chosen,
     edges = links_directed,
     directed = TRUE,
-    node_key = "id",
+    node_key = "node_id",
     edges_as_lines = FALSE,
     force = FALSE
   )
 
+plot(directed_graph)
+
+ggplot2::autoplot(directed_graph)
+
 # Verify that directed graph contains one single component
 directed_graph |> igraph::count_components(mode="weak")
 
-cc <- directed_graph %>% components(mode="weak")
+cc <- directed_graph |> igraph::components(mode="weak")
 
 rev(table(cc$csize))
 
 ## Compute edge betweenness centrality ----
 directed_graph_bc <-
   directed_graph %>%
-  tidygraph::activate("edges") %>%
+  tidygraph::activate("edges") |>
   dplyr::mutate(
     bc_travel_time =
       tidygraph::centrality_edge_betweenness(
@@ -377,14 +405,27 @@ directed_graph_bc <-
         cutoff = NULL)
     )
 
-graph_test <-
-  tidygraph::tbl_graph(
-    nodes = nodes_chosen,
-    node_key = "id",
-    edges = links_directed_nodes
-  )
+# Extract link metainfo, now including BC
+# TODO: And reattaching geometry
+edges_main <-
+  directed_graph_bc |>
+  tidygraph::activate("edges") |>
+  tibble::as_tibble()
 
-test <- igraph::graph(c(links_directed_nodes$from, links_directed_nodes$to))
+
+
+
+# graph_test <-
+#   tidygraph::tbl_graph(
+#     nodes = nodes_chosen,
+#     node_key = "node_id",
+#     edges = links_directed_nodes
+#   )
+#
+# test <- igraph::graph(c(links_directed_nodes$from, links_directed_nodes$to))
+
+
+
 
 # GAM on larger area ----
 
