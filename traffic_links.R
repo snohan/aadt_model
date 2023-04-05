@@ -1,19 +1,25 @@
-library(tidyverse)
-#library(jsonlite)
-library(sf)
-library(sfnetworks)
-library(igraph)
-#library(tidygraph)
+{
+  library(tidyverse)
+  #library(jsonlite)
+  library(sf)
+  library(sfnetworks)
+  library(igraph)
+  #library(tidygraph)
+  library(mgcv)
+  library(gratia)
+}
 
 source("H:/Programmering/R/byindeks/get_from_nvdb_api.R")
 source("H:/Programmering/R/byindeks/get_from_trafficdata_api.R")
 
 # Read ----
-links <- sf::st_read("traffic-links-2021.geojson")
-
+# Geojson files from ADM
+links <- sf::st_read("traffic-links-2022.geojson")
 nodes <- sf::st_read("traffic-link-nodes-2021.geojson")
 
-links_info <- readr::read_csv2("links_info.csv") |>
+# CSV from Kibana
+links_info <-
+  readr::read_csv2("links_info.csv") |>
   dplyr::select(
     nvdb_id,
     functional_class_high = functional_road_class_info.highest,
@@ -27,6 +33,17 @@ links_info <- readr::read_csv2("links_info.csv") |>
     trp = primary_trp,
     speed_high = speed_limit_info.highest,
     speed_low = speed_limit_info.lowest,
+    is_degenerate,
+    blocked,
+    public_transport_only = lanes_and_directions_info.has_only_public_transport_lanes
+  ) |>
+  dplyr::mutate(
+    trp_id = stringr::str_replace(trp, "^-$", NA_character_),
+    # Because of weirdness from Kibana:
+    dplyr::across(
+      .cols = c(directions, lanes_max, lanes_min, speed_high, speed_low),
+      .fns = ~ stringr::str_replace(.x, ",0", "") |> as.numeric()
+    )
   )
 
 links_tidy <-
@@ -34,13 +51,17 @@ links_tidy <-
   dplyr::select(
     nvdb_id = nvdbId,
     length,
-    start_node = startNodeAccordingToMetering,
-    end_node = endNodeAccordingToMetering
+    start_node = startPositionAccordingToMetering,
+    end_node = endPositionAccordingToMetering
   ) |>
   dplyr::left_join(
     links_info,
     by = "nvdb_id"
-  )
+  ) |>
+  dplyr::mutate(
+    log_length_km = base::log(1 + length / 1e3)
+  ) |>
+  tibble::as_tibble()
 
 # links_subset <-
 #   links |>
@@ -78,6 +99,7 @@ links_tidy <-
 #   )
 
 
+#
 # Links in chosen area ----
 # smola <-
 #   hent_kommune_v3(1573) |>
@@ -129,14 +151,8 @@ links_chosen_tidy <-
   #  union_hopen_veiholmen
   #) |>
   dplyr::mutate(
-    trp_id = stringr::str_replace(trp, "^-$", NA_character_),
     with_metering = 1,
-    link_id = dplyr::row_number(),
-    # Because of weirdness from Kibana:
-    dplyr::across(
-      .cols = c(directions, speed_high, speed_low),
-      .fns = ~ stringr::str_replace(.x, ",0", "") |> as.numeric()
-    )
+    link_id = dplyr::row_number()
   ) |>
   dplyr::relocate(
     link_id
@@ -166,6 +182,8 @@ links_chosen_narrow <-
     nvdb_id
   )
 
+
+#
 # Nodes ----
 node_ids <-
   c(
@@ -428,4 +446,149 @@ edges_main <-
 
 
 # GAM on larger area ----
+## Link info and AADT ----
+links_with_relevant_data <-
+  links_tidy |>
+  sf::st_drop_geometry() |>
+  dplyr::select(
+    nvdb_id,
+    functional_class_low,
+    lanes_min,
+    speed_high,
+    log_length_km,
+    urban_ratio,
+    public_transport_only,
+    ferry,
+    trp_id
+  )
 
+trps_on_links <-
+  base::unique(links_with_relevant_data$trp_id) |>
+  purrr::discard(is.na)
+
+#aadts <-
+#  get_aadt_for_trp_list(trps_on_links) |>
+#  dplyr::filter(!is.na(adt))
+
+#readr::write_rds(
+#  aadts,
+#  file = "aadts_test.rds"
+#)
+
+aadts <-
+  readr::read_rds(
+    file = "aadts_test.rds"
+  )
+
+
+aadt_and_link <-
+  aadts |>
+  tibble::as_tibble() |>
+  dplyr::filter(
+    year > 2010
+  ) |>
+  dplyr::select(
+    trp_id,
+    year,
+    adt
+  ) |>
+  dplyr::left_join(
+    links_with_relevant_data,
+    by = "trp_id"
+  ) |>
+  dplyr::mutate(
+    dplyr::across(
+      .cols = c(year, functional_class_low, lanes_min, speed_high),
+      .fns = ~ base::as.factor(.)
+    ),
+    year = stats::relevel(year, "2022"),
+    lanes_min = stats::relevel(lanes_min, "2")
+  ) |>
+  tibble::rowid_to_column("id")
+
+# Removing some AADTs for 2022 for later to compare prediction
+aadt_to_compare <-
+  aadt_and_link |>
+  dplyr::filter(
+    year == "2022"
+  ) |>
+  dplyr::slice_sample(n = 15)
+
+aadt_and_link_for_modelling <-
+  aadt_and_link |>
+  dplyr::filter(
+    !(id %in% aadt_to_compare$id)
+  )
+
+
+## Modelling ----
+simpel_model <-
+  mgcv::gam(
+    adt ~ 1 + year + lanes_min + functional_class_low + speed_high + s(log_length_km, k = 8),
+    family = Gamma(link = "log"),
+    data = aadt_and_link_for_modelling,
+    method = "REML"
+  )
+
+plot(
+  simpel_model,
+  pages = 1,
+  all.terms = TRUE,
+  shade = TRUE,
+  residuals = TRUE,
+  seWithMean = TRUE,
+  shift = stats::coef(simpel_model)[1]
+  )
+
+
+gratia::appraise(simpel_model)
+
+mgcv::summary.gam(simpel_model)
+
+# Look at variables with smoother functions:
+gratia::draw(simpel_model, residuals = TRUE)
+
+
+## Predicting ----
+# Predict the ones left out
+aadt_to_compare$predicted_aadt <-
+  mgcv::predict.gam(
+    simpel_model,
+    aadt_to_compare,
+    type = "response"
+  ) |>
+  base::floor()
+
+# TODO: Predict variance from predicted AADT
+# See if true AADT is within CI of predicted AADT
+
+# Predict for all links, but keep the true AADT and their true SE instead of the predicted.(?)
+
+
+# Choosing some of the links without TRP
+links_to_predict <-
+  links_with_relevant_data |>
+  dplyr::filter(
+    is.na(trp_id)
+  ) |>
+  dplyr::filter(
+    dplyr::if_all(
+      .cols = c(functional_class_low, lanes_min, speed_high),
+      .fns = ~ !base::is.na(.)
+    )
+  ) |>
+  dplyr::slice(1:100) |>
+  dplyr::mutate(
+    year = as.factor("2022")
+  )
+
+
+## Balancing ----
+
+
+## Comparing ----
+# Two different strategies:
+# 1. Leaving som TRP-AADT out of the modeling, and predicting them.
+# 2. Comparing predicted AADT on non-TRP links with manual AADT.
+
+# 1
