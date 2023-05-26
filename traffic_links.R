@@ -15,7 +15,7 @@ source("H:/Programmering/R/byindeks/get_from_trafficdata_api.R")
 # Read ----
 # Geojson files from ADM
 links <- sf::st_read("traffic-links-2022.geojson")
-nodes <- sf::st_read("traffic-link-nodes-2021.geojson")
+nodes <- sf::st_read("traffic-link-nodes-2022.geojson")
 
 # CSV from Kibana
 links_info <-
@@ -26,24 +26,27 @@ links_info <-
     functional_class_low = functional_road_class_info.lowest,
     ferry = is_ferry_traffic_link,
     directions = lanes_and_directions_info.direction_types,
-    road_category = location.road_category,
+    road_category = road_category,
     urban_ratio,
     lanes_max = lanes_and_directions_info.max_num_lanes,
     lanes_min = lanes_and_directions_info.min_num_lanes,
     trp = primary_trp,
     speed_high = speed_limit_info.highest,
     speed_low = speed_limit_info.lowest,
-    is_degenerate,
     blocked,
-    public_transport_only = lanes_and_directions_info.has_only_public_transport_lanes
+    public_transport_only = lanes_and_directions_info.has_only_public_transport_lanes,
+    is_invalid,
+    invalid_reason
   ) |>
+  #dplyr::filter(nvdb_id == "1016726680")
   dplyr::mutate(
     trp_id = stringr::str_replace(trp, "^-$", NA_character_),
     # Because of weirdness from Kibana:
     dplyr::across(
-      .cols = c(directions, lanes_max, lanes_min, speed_high, speed_low),
+      .cols = c(lanes_max, lanes_min, speed_high, speed_low),
       .fns = ~ stringr::str_replace(.x, ",0", "") |> as.numeric()
-    )
+    ),
+    directions = stringr::str_sub(directions, 1, 1) |> as.numeric()
   )
 
 links_tidy <-
@@ -51,8 +54,8 @@ links_tidy <-
   dplyr::select(
     nvdb_id = nvdbId,
     length,
-    start_node = startPositionAccordingToMetering,
-    end_node = endPositionAccordingToMetering
+    start_node = startTrafficNodeId,
+    end_node = endTrafficNodeId
   ) |>
   dplyr::left_join(
     links_info,
@@ -60,8 +63,8 @@ links_tidy <-
   ) |>
   dplyr::mutate(
     log_length_km = base::log(1 + length / 1e3)
-  ) |>
-  tibble::as_tibble()
+  )
+
 
 # links_subset <-
 #   links |>
@@ -223,6 +226,54 @@ links_chosen_tidy |>
   geom_sf(data = nodes_chosen)
 
 
+# TRP ----
+trp <- get_points()
+
+trp_commissions <-
+  trp |>
+  dplyr::filter(
+    traffic_type == "VEHICLE",
+    !(operational_status == "RETIRED")
+  ) |>
+  dplyr::select(
+    trp_id,
+    name,
+    registration_frequency,
+    #lat, lon,
+    valid_from = validFrom,
+    valid_to = validTo
+  ) |>
+  dplyr::mutate(
+    registration_period = lubridate::interval(valid_from, valid_to)
+  ) |>
+  dplyr::select(
+    -valid_from,
+    -valid_to
+  ) |>
+  dplyr::group_by(
+    trp_id
+  )
+
+trp_commissions_tidy <-
+  dplyr::bind_rows(
+    trp_commissions |>
+      dplyr::filter(
+        registration_frequency == "CONTINUOUS"
+      ) |>
+      dplyr::select(-registration_period) |>
+      dplyr::distinct(),
+    trp_commissions |>
+      dplyr::filter(
+        registration_frequency == "PERIODIC"
+      ) |>
+      tidyr::nest(registration_periods = registration_period)
+  ) |>
+  dplyr::left_join(
+    trp_direction,
+    by = "trp_id"
+  )
+
+
 # TRP heading ----
 trp_direction <-
   get_trps_with_direction() %>%
@@ -240,7 +291,7 @@ trp_with_metering <-
     heading = to_according_to_metering
   ) %>%
   dplyr::mutate(
-    with_metering = 1
+    with_metering = TRUE
   )
 
 trp_against_metering <-
@@ -250,7 +301,7 @@ trp_against_metering <-
     heading = from_according_to_metering
   ) %>%
   dplyr::mutate(
-    with_metering = 0
+    with_metering = FALSE
   )
 
 trp_heading <-
@@ -262,20 +313,104 @@ trp_heading <-
     trp_id
   )
 
+# For GIS ----
+# links_commissions <-
+#   links_tidy |>
+#   dplyr::left_join(
+#     trp_commissions_tidy,
+#     by = "trp_id"
+#   )
+trp_metadata <-
+  trp |>
+  dplyr::filter(
+    traffic_type == "VEHICLE",
+    !(operational_status == "RETIRED")
+  ) |>
+  dplyr::select(
+    trp_id,
+    road_reference,
+    name,
+    registration_frequency,
+    county_name
+  ) |>
+  dplyr::distinct() |>
+  dplyr::left_join(
+    trp_direction,
+    by = "trp_id"
+  )
+
+links_for_gis <-
+  links_tidy |>
+  dplyr::select(
+    nvdb_id,
+    road_category,
+    trp_id
+  ) |>
+  dplyr::left_join(
+    trp_metadata,
+    by = "trp_id"
+  ) |>
+  # Transforming to flat EPSG:3857 web mercator to suit the map in ArcGIS
+  sf::st_transform(3857)
+
+periodic_commissions_for_gis <-
+  trp |>
+  dplyr::filter(
+    traffic_type == "VEHICLE",
+    !(operational_status == "RETIRED"),
+    registration_frequency == "PERIODIC"
+  ) |>
+  dplyr::select(
+    trp_id,
+    name,
+    valid_from = validFrom,
+    valid_to = validTo
+  ) |>
+  dplyr::mutate(
+    registration_period = lubridate::interval(valid_from, valid_to),
+    registration_period_text = as.character(registration_period) |>
+      stringr::str_remove_all(" CEST") |>
+      stringr::str_remove_all(" CET")
+  ) |>
+  dplyr::select(
+    -valid_from,
+    -valid_to,
+    -registration_period
+  )
+
+sf::st_write(
+  links_for_gis,
+  dsn = "links_and_periodic_commissions.gpkg",
+  layer = "links",
+  append = FALSE
+)
+
+sf::st_write(
+  periodic_commissions_for_gis,
+  dsn = "links_and_periodic_commissions.gpkg",
+  layer = "commissions",
+  append = FALSE
+)
+
+# TODO: GDB with two layers
+# Layer 1: link geometry and metadata including TRP metadata
+# Layer 2: TRP commissions
+
 
 # AADT ----
-trps <-
-  links_chosen_tidy$trp |>
+trps_on_links <-
+  base::unique(directed_links_tidy$trp_id) |>
   purrr::discard(is.na)
 
 aadt <-
-  get_aadt_by_direction_for_trp_list(trps)
+  get_aadt_by_direction_for_trp_list(trps_on_links)
 
 aadt_heading <-
   aadt |>
   dplyr::left_join(
     trp_heading,
-    by = c("trp_id", "heading")
+    by = c("trp_id", "heading"),
+    relationship = "many-to-many"
   ) |>
   dplyr::select(
     trp_id,
@@ -284,6 +419,12 @@ aadt_heading <-
     adt,
     se_mean
   )
+
+readr::write_rds(
+  aadt_heading,
+  file = "aadt_heading.rds"
+)
+
 
 #Directed links ----
 links_one_way <-
@@ -445,150 +586,3 @@ edges_main <-
 
 
 
-# GAM on larger area ----
-## Link info and AADT ----
-links_with_relevant_data <-
-  links_tidy |>
-  sf::st_drop_geometry() |>
-  dplyr::select(
-    nvdb_id,
-    functional_class_low,
-    lanes_min,
-    speed_high,
-    log_length_km,
-    urban_ratio,
-    public_transport_only,
-    ferry,
-    trp_id
-  )
-
-trps_on_links <-
-  base::unique(links_with_relevant_data$trp_id) |>
-  purrr::discard(is.na)
-
-#aadts <-
-#  get_aadt_for_trp_list(trps_on_links) |>
-#  dplyr::filter(!is.na(adt))
-
-#readr::write_rds(
-#  aadts,
-#  file = "aadts_test.rds"
-#)
-
-aadts <-
-  readr::read_rds(
-    file = "aadts_test.rds"
-  )
-
-
-aadt_and_link <-
-  aadts |>
-  tibble::as_tibble() |>
-  dplyr::filter(
-    year > 2010
-  ) |>
-  dplyr::select(
-    trp_id,
-    year,
-    adt
-  ) |>
-  dplyr::left_join(
-    links_with_relevant_data,
-    by = "trp_id"
-  ) |>
-  dplyr::mutate(
-    dplyr::across(
-      .cols = c(year, functional_class_low, lanes_min, speed_high),
-      .fns = ~ base::as.factor(.)
-    ),
-    year = stats::relevel(year, "2022"),
-    lanes_min = stats::relevel(lanes_min, "2")
-  ) |>
-  tibble::rowid_to_column("id")
-
-# Removing some AADTs for 2022 for later to compare prediction
-aadt_to_compare <-
-  aadt_and_link |>
-  dplyr::filter(
-    year == "2022"
-  ) |>
-  dplyr::slice_sample(n = 15)
-
-aadt_and_link_for_modelling <-
-  aadt_and_link |>
-  dplyr::filter(
-    !(id %in% aadt_to_compare$id)
-  )
-
-
-## Modelling ----
-simpel_model <-
-  mgcv::gam(
-    adt ~ 1 + year + lanes_min + functional_class_low + speed_high + s(log_length_km, k = 8),
-    family = Gamma(link = "log"),
-    data = aadt_and_link_for_modelling,
-    method = "REML"
-  )
-
-plot(
-  simpel_model,
-  pages = 1,
-  all.terms = TRUE,
-  shade = TRUE,
-  residuals = TRUE,
-  seWithMean = TRUE,
-  shift = stats::coef(simpel_model)[1]
-  )
-
-
-gratia::appraise(simpel_model)
-
-mgcv::summary.gam(simpel_model)
-
-# Look at variables with smoother functions:
-gratia::draw(simpel_model, residuals = TRUE)
-
-
-## Predicting ----
-# Predict the ones left out
-aadt_to_compare$predicted_aadt <-
-  mgcv::predict.gam(
-    simpel_model,
-    aadt_to_compare,
-    type = "response"
-  ) |>
-  base::floor()
-
-# TODO: Predict variance from predicted AADT
-# See if true AADT is within CI of predicted AADT
-
-# Predict for all links, but keep the true AADT and their true SE instead of the predicted.(?)
-
-
-# Choosing some of the links without TRP
-links_to_predict <-
-  links_with_relevant_data |>
-  dplyr::filter(
-    is.na(trp_id)
-  ) |>
-  dplyr::filter(
-    dplyr::if_all(
-      .cols = c(functional_class_low, lanes_min, speed_high),
-      .fns = ~ !base::is.na(.)
-    )
-  ) |>
-  dplyr::slice(1:100) |>
-  dplyr::mutate(
-    year = as.factor("2022")
-  )
-
-
-## Balancing ----
-
-
-## Comparing ----
-# Two different strategies:
-# 1. Leaving som TRP-AADT out of the modeling, and predicting them.
-# 2. Comparing predicted AADT on non-TRP links with manual AADT.
-
-# 1

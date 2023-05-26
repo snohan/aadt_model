@@ -7,3 +7,4 @@ archive/
 *.Rproj
 *.csv
 nr_original/
+*.rds
