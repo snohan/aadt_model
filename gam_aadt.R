@@ -1,6 +1,6 @@
 {
   library(tidyverse)
-  #library(jsonlite)
+  library(broom)
   library(sf)
   library(sfnetworks)
   library(igraph)
@@ -9,7 +9,8 @@
   library(gratia)
 }
 
-source("H:/Programmering/R/byindeks/get_from_trafficdata_api.R")
+# To get fresh AADT
+#source("H:/Programmering/R/byindeks/get_from_trafficdata_api.R")
 
 
 # Read directed links ----
@@ -89,6 +90,23 @@ directed_links_tidy <-
 
 remove(directed_links)
 
+directed_links_combinations <-
+  directed_links_tidy |>
+  dplyr::filter(
+    dplyr::if_all(
+      .cols = c(functional_class_low, lanes_min, speed_high),
+      .fns = ~ !base::is.na(.)
+    )
+  ) |>
+  dplyr::group_by(
+    lanes_min,
+    functional_class_low,
+    speed_high
+  ) |>
+  dplyr::summarise(
+    n = n(),
+    .groups = "drop"
+  )
 
 # AADT ----
 # trps_on_links <-
@@ -119,8 +137,130 @@ aadt_heading <-
     file = "aadt_heading.rds"
   )
 
-aadt_and_link <-
+
+# Links and AADT ----
+# All links with latest AADT
+latest_aadt_and_link <-
   aadt_heading |>
+  tibble::as_tibble() |>
+  dplyr::slice_max(year) |>
+  dplyr::select(
+    trp_id,
+    year,
+    with_metering,
+    adt,
+    se_mean
+  ) |>
+  dplyr::right_join(
+    directed_links_tidy,
+    by = c("trp_id", "with_metering")
+  ) |>
+  dplyr::mutate(
+    year = year |> forcats::as_factor() |> stats::relevel("2022"),
+    adt =
+      dplyr::case_when(
+        adt == 0 ~ NA_integer_,
+        TRUE ~ adt
+      )
+  )
+
+# How representative are the links with AADT?
+aadt_and_link_combinations <-
+  latest_aadt_and_link |>
+  dplyr::filter(
+    dplyr::if_all(
+      .cols = c(functional_class_low, lanes_min, speed_high, adt),
+      .fns = ~ !base::is.na(.)
+    )
+  ) |>
+  dplyr::group_by(
+    lanes_min,
+    functional_class_low,
+    speed_high
+  ) |>
+  dplyr::summarise(
+    n_with_aadt = n(),
+    .groups = "drop"
+  )
+
+compare_link_and_aadt_distribution <-
+  directed_links_combinations |>
+  dplyr::left_join(
+    aadt_and_link_combinations,
+    by = dplyr::join_by(functional_class_low, lanes_min, speed_high)
+  ) |>
+  dplyr::mutate(
+    n_with_aadt =
+      dplyr::case_when(
+        is.na(n_with_aadt) ~ 0,
+        TRUE ~ n_with_aadt
+      ),
+    n_with_aadt_ratio = (n_with_aadt / (n_with_aadt + n)) |> round(2)
+  )
+
+
+# Split training and validation set ----
+# Need to combine all AADT with links first to check if
+# validation set will be a representative sample of the model variables.
+# Representative in comparison to:
+# - all links? Yes, but without depleting training set.
+# - links in training set? NO, because training set will be expanded.
+
+# Picking some AADTs for 2022 for later to compare prediction
+aadt_heading_for_validation <-
+  aadt_heading |>
+  dplyr::filter(
+    year == 2022,
+    se_mean == 0,
+    adt > 100
+  )
+
+
+
+
+
+
+
+
+chosen_trps <-
+  aadt_heading_for_validation |>
+  dplyr::select(
+    trp_id
+  ) |>
+  dplyr::distinct() |>
+  dplyr::slice_sample(n = 500)
+
+aadt_heading_for_validation_chosen <-
+  aadt_heading_for_validation |>
+  dplyr::filter(
+    trp_id %in% chosen_trps$trp_id
+  )
+
+# DO NOT OVERWRITE
+# readr::write_rds(
+#   aadt_heading_for_validation_chosen,
+#   "aadt_test_set.rds"
+# )
+
+aadt_heading_for_validation_chosen <-
+  readr::read_rds(
+    "aadt_test_set.rds"
+  )
+
+
+
+
+
+# Removing test set from training set
+aadt_heading_training <-
+  aadt_heading |>
+  dplyr::filter(
+    !(trp_id %in% aadt_heading_for_validation_chosen$trp_id)
+  )
+
+
+aadt_and_link <-
+  aadt_heading_training |>
   tibble::as_tibble() |>
   dplyr::filter(
     year > 2010
@@ -151,36 +291,78 @@ table(aadt_and_link$road_category, aadt_and_link$functional_class_low)
 summary(aadt_and_link$log_length_km)
 summary(aadt_and_link$adt)
 
-# Removing some AADTs for 2022 for later to compare prediction
-aadt_to_compare <-
+# Compare links in training and test set
+aadt_and_link_training <-
   aadt_and_link |>
   dplyr::filter(
-    year == "2022"
+    !is.na(adt)
   ) |>
-  dplyr::slice_sample(n = 15)
+  dplyr::slice_max(year)
 
-aadt_and_link_for_modelling <-
-  aadt_and_link |>
-  dplyr::filter(
-    !(id %in% aadt_to_compare$id)
+
+aadt_and_link_test <-
+  aadt_heading_for_validation_chosen |>
+  tibble::as_tibble() |>
+  dplyr::select(
+    trp_id,
+    year,
+    with_metering,
+    adt,
+    se_mean
+  ) |>
+  dplyr::left_join(
+    directed_links_tidy,
+    by = c("trp_id", "with_metering")
+  ) |>
+  dplyr::mutate(
+    year = year |> forcats::as_factor() |> stats::relevel("2022"),
+    adt =
+      dplyr::case_when(
+        adt == 0 ~ NA_integer_,
+        TRUE ~ adt
+      )
   )
-# TODO: set adt to NA for these
 
-
-# GAM on larger area ----
-trondelag <-
-  aadt_and_link |>
-  dplyr::filter(
-    county_ids == 50
+comparison_lanes <-
+  dplyr::bind_rows(
+    summary(aadt_and_link_training$lanes_min),
+    summary(aadt_and_link_test$lanes_min)
   )
 
-## Modelling ----
+
+# Modelling ----
 simpel_model <-
   mgcv::gam(
     adt ~ 1 + year + lanes_min + functional_class_low + speed_high + log_length_km * urban_ratio,
     family = Gamma(link = "log"),
     data = aadt_and_link,
     method = "REML"
+  )
+
+# TODO: why no more smooth terms? They can only be used for numerical variables!
+# For s-functions:
+# Determine number of basis functions: k = ?
+# Determine smoothing parameter: s = ?
+# Add categorical variables as "by" in s-functions?
+
+# To compare models that are based on the same data set, use:
+# AIC
+# GCV/UBRE
+# R adj
+
+# simpel_model_alt_1 <-
+#   mgcv::gam(
+#     adt ~ 1 + year + lanes_min + functional_class_low + speed_high + log_length_km * urban_ratio,
+#     family = Gamma(link = "log"),
+#     data = aadt_and_link,
+#     method = "REML"
+#   )
+
+## Checking results ----
+simpel_model_results <-
+  dplyr::bind_rows(
+    broom::glance(simpel_model),
+    #broom::glance(simpel_model_alt_1)
   )
 
 plot(
@@ -193,24 +375,31 @@ plot(
   shift = stats::coef(simpel_model)[1]
 )
 
-
 gratia::appraise(simpel_model)
 
 mgcv::summary.gam(simpel_model)
 mgcv::gam.check(simpel_model)
+# Model must have convergence!
+# EDF should not be close to k'.
+# QQ-plot should be close to straight line.
+# Histogram should have bell shape.
+# Residuals should be evenly spread around zero.
+# Response plot should cluster around the 1-to-1 line.
+
 
 # Look at variables with smoother functions:
 gratia::draw(simpel_model, residuals = TRUE)
 
 
-## Predicting ----
+# Predicting ----
+# The data frame with all links, to hold the predicted aadt
 directed_links_predicted_aadt <-
   directed_links_tidy |>
   dplyr::mutate(
     year = "2022"
   )
 
-# Predict the ones left out
+# Predict
 directed_links_predicted_aadt$predicted_aadt <-
   mgcv::predict.gam(
     simpel_model,
@@ -249,12 +438,39 @@ links_to_predict <-
   )
 
 
-## Balancing ----
-
-
-## Comparing ----
+# Comparing predictions to test set ----
 # Two different strategies:
 # 1. Leaving som TRP-AADT out of the modeling, and predicting them.
 # 2. Comparing predicted AADT on non-TRP links with manual AADT.
 
 # 1
+aadt_compared <-
+  aadt_heading_for_validation_chosen |>
+  dplyr::select(
+    trp_id,
+    with_metering,
+    adt_true = adt
+  ) |>
+  dplyr::left_join(
+    directed_links_predicted_aadt,
+    by = dplyr::join_by(trp_id, with_metering)
+  ) |>
+  dplyr::select(
+    id,
+    trp_id,
+    with_metering,
+    county_ids,
+    road_category,
+    lanes_min,
+    functional_class_low,
+    speed_high,
+    log_length_km,
+    urban_ratio,
+    adt_true,
+    predicted_aadt
+  ) |>
+  dplyr::mutate(
+    diff = predicted_aadt - adt_true
+  )
+
+sum_absolute_diff <- sum(aadt_compared$diff)
