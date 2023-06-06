@@ -85,7 +85,11 @@ directed_links_tidy <-
         functional_class_low %in% c("4", "5", "6") & road_category %in% c("EUROPAVEG", "RIKSVEG") ~ "3",
         TRUE ~ functional_class_low
       ) |> forcats::as_factor() |>
-      stats::relevel("3")
+      stats::relevel("3"),
+    county_id_single =
+      stringr::str_sub(county_ids, 1, 2) |>
+      forcats::as_factor() |>
+      stats::relevel("30")
   )
 
 remove(directed_links)
@@ -107,6 +111,7 @@ directed_links_combinations <-
     n = n(),
     .groups = "drop"
   )
+
 
 # AADT ----
 # trps_on_links <-
@@ -135,7 +140,20 @@ directed_links_combinations <-
 aadt_heading <-
   readr::read_rds(
     file = "aadt_heading.rds"
+  ) |>
+  # Remove TRPs with same name in both directions
+  dplyr::filter(
+    !(trp_id %in% c("54183V72689", "00916V704910", "02087V625292"))
+  ) |>
+  # Romove non-existent directions
+  dplyr::filter(
+    adt > 25
+  ) |>
+  dplyr::filter(
+    !is.na(adt)
   )
+
+length(unique(aadt_heading$trp_id))
 
 
 # Links and AADT ----
@@ -143,7 +161,10 @@ aadt_heading <-
 latest_aadt_and_link <-
   aadt_heading |>
   tibble::as_tibble() |>
-  dplyr::slice_max(year) |>
+  dplyr::slice_max(
+    year,
+    by = trp_id
+  ) |>
   dplyr::select(
     trp_id,
     year,
@@ -164,6 +185,24 @@ latest_aadt_and_link <-
       )
   )
 
+# latest_aadt_and_link_ids <-
+#   latest_aadt_and_link |>
+#   dplyr::reframe(
+#     n_ids = n(),
+#     .by = id
+#   ) |>
+#   dplyr::filter(
+#     n_ids > 1
+#   )
+
+length(unique(latest_aadt_and_link$id))
+
+summary(latest_aadt_and_link$functional_class_low)
+summary(latest_aadt_and_link$lanes_min)
+summary(latest_aadt_and_link$speed_high)
+table(latest_aadt_and_link$road_category, latest_aadt_and_link$functional_class_low)
+summary(latest_aadt_and_link$adt)
+
 # How representative are the links with AADT?
 aadt_and_link_combinations <-
   latest_aadt_and_link |>
@@ -182,6 +221,19 @@ aadt_and_link_combinations <-
     n_with_aadt = n(),
     .groups = "drop"
   )
+
+trps_on_links_with_complete_metadata <-
+  latest_aadt_and_link |>
+  dplyr::filter(
+    dplyr::if_all(
+      .cols = c(functional_class_low, lanes_min, speed_high, adt),
+      #.cols = c(adt),
+      .fns = ~ !base::is.na(.)
+    )
+  )
+
+length(unique(latest_aadt_and_link$trp_id)) # TRPs on links
+length(unique(trps_on_links_with_complete_metadata$trp_id)) # TRPs with AADT on links
 
 compare_link_and_aadt_distribution <-
   directed_links_combinations |>
@@ -205,66 +257,97 @@ compare_link_and_aadt_distribution <-
 # Representative in comparison to:
 # - all links? Yes, but without depleting training set.
 # - links in training set? NO, because training set will be expanded.
+# - consider both directions when splitting? No, does not matter.
+# - just check whether the random selcetion resembles the link combination distribution.
 
-# Picking some AADTs for 2022 for later to compare prediction
-aadt_heading_for_validation <-
-  aadt_heading |>
-  dplyr::filter(
-    year == 2022,
-    se_mean == 0,
-    adt > 100
-  )
-
-
-
-
-
-
-
-
-chosen_trps <-
-  aadt_heading_for_validation |>
-  dplyr::select(
-    trp_id
-  ) |>
-  dplyr::distinct() |>
-  dplyr::slice_sample(n = 500)
-
-aadt_heading_for_validation_chosen <-
-  aadt_heading_for_validation |>
-  dplyr::filter(
-    trp_id %in% chosen_trps$trp_id
-  )
-
-# DO NOT OVERWRITE
+## Test set ----
+# Picking AADTs with complete 2022
+# aadt_heading_for_validation <-
+#   aadt_heading |>
+#   dplyr::filter(
+#     year == 2022,
+#     se_mean == 0,
+#     adt > 100
+#   ) |>
+#   dplyr::filter(
+#     trp_id %in% trps_on_links_with_complete_metadata$trp_id
+#   ) |>
+#   # Removing TRPs with erroneous data
+#   dplyr::filter(
+#     !(trp_id %in% c("47140V625367"))
+#   )
+#
+# chosen_trps <-
+#   aadt_heading_for_validation |>
+#   dplyr::select(
+#     trp_id
+#   ) |>
+#   dplyr::distinct() |>
+#   dplyr::slice_sample(n = 250)
+#
+# aadt_heading_test <-
+#   aadt_heading |>
+#   dplyr::filter(
+#     trp_id %in% chosen_trps$trp_id
+#   )
+#
+# # DO NOT OVERWRITE
 # readr::write_rds(
-#   aadt_heading_for_validation_chosen,
+#   aadt_heading_test,
 #   "aadt_test_set.rds"
 # )
 
-aadt_heading_for_validation_chosen <-
+aadt_heading_test <-
   readr::read_rds(
     "aadt_test_set.rds"
   )
 
+aadt_and_link_test <-
+  aadt_heading_test |>
+  tibble::as_tibble() |>
+  dplyr::select(
+    trp_id,
+    year,
+    with_metering,
+    adt,
+    se_mean
+  ) |>
+  # Left join to keep only links with the chosen TRPs
+  dplyr::left_join(
+    directed_links_tidy,
+    by = c("trp_id", "with_metering")
+  ) |>
+  dplyr::mutate(
+    year = year |> forcats::as_factor() |> stats::relevel("2022"),
+    adt =
+      dplyr::case_when(
+        adt == 0 ~ NA_integer_,
+        TRUE ~ adt
+      )
+  ) |>
+  dplyr::filter(
+    year == 2022,
+    !is.na(id)
+  )
 
 
-
-
+## Training set ----
 # Removing test set from training set
 aadt_heading_training <-
   aadt_heading |>
   dplyr::filter(
-    !(trp_id %in% aadt_heading_for_validation_chosen$trp_id)
+    !(trp_id %in% aadt_heading_test$trp_id)
   )
 
+# Must be zero
+nrow(aadt_heading) - nrow(aadt_heading_training) - nrow(aadt_heading_test)
 
-aadt_and_link <-
+aadt_and_link_training <-
   aadt_heading_training |>
   tibble::as_tibble() |>
-  dplyr::filter(
-    year > 2010
-  ) |>
+  # dplyr::filter(
+  #   year > 2010
+  # ) |>
   dplyr::select(
     trp_id,
     year,
@@ -285,48 +368,77 @@ aadt_and_link <-
       )
   )
 
-summary(aadt_and_link$functional_class_low)
-summary(aadt_and_link$speed_high)
-table(aadt_and_link$road_category, aadt_and_link$functional_class_low)
-summary(aadt_and_link$log_length_km)
-summary(aadt_and_link$adt)
 
+## Compare ----
 # Compare links in training and test set
-aadt_and_link_training <-
-  aadt_and_link |>
+latest_aadt_and_link_training_combinations <-
+  aadt_and_link_training |>
   dplyr::filter(
     !is.na(adt)
   ) |>
-  dplyr::slice_max(year)
-
-
-aadt_and_link_test <-
-  aadt_heading_for_validation_chosen |>
-  tibble::as_tibble() |>
-  dplyr::select(
-    trp_id,
+  dplyr::slice_max(
     year,
-    with_metering,
-    adt,
-    se_mean
+    by = trp_id
   ) |>
-  dplyr::left_join(
-    directed_links_tidy,
-    by = c("trp_id", "with_metering")
+  dplyr::group_by(
+    lanes_min,
+    functional_class_low,
+    speed_high
   ) |>
-  dplyr::mutate(
-    year = year |> forcats::as_factor() |> stats::relevel("2022"),
-    adt =
-      dplyr::case_when(
-        adt == 0 ~ NA_integer_,
-        TRUE ~ adt
-      )
+  dplyr::summarise(
+    n_training = n(),
+    .groups = "drop"
   )
 
+aadt_and_link_test_combinations <-
+  aadt_and_link_test |>
+  # dplyr::slice_max(
+  #   year,
+  #   by = trp_id
+  # ) |>
+  dplyr::group_by(
+    lanes_min,
+    functional_class_low,
+    speed_high
+  ) |>
+  dplyr::summarise(
+    n_test = n(),
+    .groups = "drop"
+  )
+
+compare_distributions <-
+  compare_link_and_aadt_distribution |>
+  dplyr::left_join(
+    latest_aadt_and_link_training_combinations,
+    by = dplyr::join_by(functional_class_low, lanes_min, speed_high)
+  ) |>
+  dplyr::left_join(
+    aadt_and_link_test_combinations,
+    by = dplyr::join_by(functional_class_low, lanes_min, speed_high)
+  )
+
+# Must be zero
+sum(compare_distributions$n_with_aadt, na.rm = TRUE) -
+  sum(compare_distributions$n_training, na.rm = TRUE) -
+  sum(compare_distributions$n_test, na.rm = TRUE)
+
+# Should have no NAs in test set
 comparison_lanes <-
   dplyr::bind_rows(
     summary(aadt_and_link_training$lanes_min),
     summary(aadt_and_link_test$lanes_min)
+  )
+
+comparison_road_class <-
+  dplyr::bind_rows(
+    summary(aadt_and_link_training$functional_class_low),
+    summary(aadt_and_link_test$functional_class_low)
+  )
+
+comparison_speed <-
+  dplyr::bind_rows(
+    summary(aadt_and_link_training$speed_high),
+    summary(aadt_and_link_test$speed_high)
   )
 
 
@@ -335,7 +447,15 @@ simpel_model <-
   mgcv::gam(
     adt ~ 1 + year + lanes_min + functional_class_low + speed_high + log_length_km * urban_ratio,
     family = Gamma(link = "log"),
-    data = aadt_and_link,
+    data = aadt_and_link_training,
+    method = "REML"
+  )
+
+simpel_model_county <-
+  mgcv::gam(
+    adt ~ 1 + year + county_id_single + lanes_min + functional_class_low + speed_high + log_length_km * urban_ratio,
+    family = Gamma(link = "log"),
+    data = aadt_and_link_training,
     method = "REML"
   )
 
@@ -362,7 +482,7 @@ simpel_model <-
 simpel_model_results <-
   dplyr::bind_rows(
     broom::glance(simpel_model),
-    #broom::glance(simpel_model_alt_1)
+    broom::glance(simpel_model_county)
   )
 
 plot(
@@ -375,10 +495,10 @@ plot(
   shift = stats::coef(simpel_model)[1]
 )
 
-gratia::appraise(simpel_model)
+gratia::appraise(simpel_model_county)
 
 mgcv::summary.gam(simpel_model)
-mgcv::gam.check(simpel_model)
+mgcv::gam.check(simpel_model_county)
 # Model must have convergence!
 # EDF should not be close to k'.
 # QQ-plot should be close to straight line.
@@ -399,6 +519,12 @@ directed_links_predicted_aadt <-
     year = "2022"
   )
 
+directed_links_predicted_aadt_county <-
+  directed_links_tidy |>
+  dplyr::mutate(
+    year = "2022"
+  )
+
 # Predict
 directed_links_predicted_aadt$predicted_aadt <-
   mgcv::predict.gam(
@@ -414,28 +540,19 @@ predicted_na <-
     is.na(predicted_aadt)
   )
 
+directed_links_predicted_aadt_county$predicted_aadt <-
+  mgcv::predict.gam(
+    simpel_model_county,
+    directed_links_predicted_aadt_county,
+    type = "response"
+  ) |>
+  base::floor()
+
+
 # TODO: Predict variance from predicted AADT
 # See if true AADT is within CI of predicted AADT
 
 # Predict for all links, but keep the true AADT and their true SE instead of the predicted.(?)
-
-
-# Choosing some of the links without TRP
-links_to_predict <-
-  links_with_relevant_data |>
-  dplyr::filter(
-    is.na(trp_id)
-  ) |>
-  dplyr::filter(
-    dplyr::if_all(
-      .cols = c(functional_class_low, lanes_min, speed_high),
-      .fns = ~ !base::is.na(.)
-    )
-  ) |>
-  dplyr::slice(1:100) |>
-  dplyr::mutate(
-    year = as.factor("2022")
-  )
 
 
 # Comparing predictions to test set ----
@@ -445,7 +562,10 @@ links_to_predict <-
 
 # 1
 aadt_compared <-
-  aadt_heading_for_validation_chosen |>
+  aadt_heading_test |>
+  dplyr::filter(
+    year == 2022,
+  ) |>
   dplyr::select(
     trp_id,
     with_metering,
@@ -459,7 +579,7 @@ aadt_compared <-
     id,
     trp_id,
     with_metering,
-    county_ids,
+    county_id_single,,
     road_category,
     lanes_min,
     functional_class_low,
@@ -470,7 +590,43 @@ aadt_compared <-
     predicted_aadt
   ) |>
   dplyr::mutate(
-    diff = predicted_aadt - adt_true
+    diff = abs(predicted_aadt - adt_true)
   )
 
-sum_absolute_diff <- sum(aadt_compared$diff)
+sum_absolute_diff <- sum(aadt_compared$diff, na.rm = TRUE)
+
+aadt_compared_county <-
+  aadt_heading_test |>
+  dplyr::filter(
+    year == 2022,
+  ) |>
+  dplyr::select(
+    trp_id,
+    with_metering,
+    adt_true = adt
+  ) |>
+  dplyr::left_join(
+    directed_links_predicted_aadt_county,
+    by = dplyr::join_by(trp_id, with_metering)
+  ) |>
+  dplyr::select(
+    id,
+    trp_id,
+    with_metering,
+    county_id_single,
+    road_category,
+    lanes_min,
+    functional_class_low,
+    speed_high,
+    log_length_km,
+    urban_ratio,
+    adt_true,
+    predicted_aadt
+  ) |>
+  dplyr::mutate(
+    diff = abs(predicted_aadt - adt_true)
+  )
+
+sum_absolute_diff_county <- sum(aadt_compared_county$diff, na.rm = TRUE)
+
+# Model with county performs better!
