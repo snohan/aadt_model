@@ -579,7 +579,7 @@ aadt_compared <-
     id,
     trp_id,
     with_metering,
-    county_id_single,,
+    county_id_single,
     road_category,
     lanes_min,
     functional_class_low,
@@ -590,10 +590,12 @@ aadt_compared <-
     predicted_aadt
   ) |>
   dplyr::mutate(
-    diff = abs(predicted_aadt - adt_true)
+    diff = abs(predicted_aadt - adt_true),
+    diff_relative = abs(predicted_aadt - adt_true) / adt_true
   )
 
 sum_absolute_diff <- sum(aadt_compared$diff, na.rm = TRUE)
+mean_relative_diff <- mean(aadt_compared$diff_relative)
 
 aadt_compared_county <-
   aadt_heading_test |>
@@ -624,9 +626,11 @@ aadt_compared_county <-
     predicted_aadt
   ) |>
   dplyr::mutate(
-    diff = abs(predicted_aadt - adt_true)
+    diff = abs(predicted_aadt - adt_true),
+    diff_relative = abs(predicted_aadt - adt_true) / adt_true
   )
 
 sum_absolute_diff_county <- sum(aadt_compared_county$diff, na.rm = TRUE)
+mean_relative_diff_county <- mean(aadt_compared_county$diff_relative)
 
 # Model with county performs better!
