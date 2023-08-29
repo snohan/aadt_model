@@ -14,48 +14,154 @@
 
 
 # Read directed links ----
-# From Kibana CSVs
-tl_files <- list.files(pattern = "directed_tl*")
+# Relevant fields from ES
 
+# _id
+# associated_trps.trp_id
+# blocked
+# end_traffic_node_id
+# functional_road_class_info.highest
+# functional_road_class_info.lowest
+# has_tourist_road
+# is_ferry_traffic_link
+# is_invalid
+# is_traffic_with_metering_direction
+# lane_info.has_only_public_transport_lanes
+# lane_info.max_num_lanes
+# lane_info.min_num_lanes
+# length
+# location.county_ids
+# location.municipality_ids
+# primary_trp.trp_id
+# road_category
+# road_system_references.road_system.number
+# speed_limit_info.highest
+# speed_limit_info.lowest
+# start_traffic_node_id
+# urban_ratio
+
+# From ES dump ndjson (Vegard)
 directed_links <-
-  purrr::map(
-    tl_files,
-    ~ readr::read_csv2(file = .x, col_types = readr::cols(location.county_ids = "c"))
+  jsonlite::stream_in(
+    base::file("20230828_directed_traffic_link_2022.json"),
+    flatten = TRUE
   ) |>
-  purrr::list_rbind() |>
-  dplyr::select(
-    id = '_id',
-    #functional_class_high = functional_road_class_info.highest,
-    functional_class_low = functional_road_class_info.lowest,
-    with_metering = is_traffic_with_metering_direction,
-    length,
-    county_ids = location.county_ids,
-    #ferry = is_ferry_traffic_link,
-    #directions = lanes_and_directions_info.direction_types,
-    road_category,
-    urban_ratio,
-    #lanes_max = lane_info.max_num_lanes,
-    lanes_min = lane_info.min_num_lanes,
-    trp_id = primary_trp,
-    speed_high = speed_limit_info.highest,
-    speed_low = speed_limit_info.lowest,
-    #blocked,
-    #public_transport_only = lane_info.has_only_public_transport_lanes,
-    #is_invalid,
-    #invalid_reason
-  )
+  tibble::as_tibble()
 
+
+# From ADM exported geojson
+#directed_links <- sf::st_read("directed-traffic-links-2022.geojson")
+
+
+# CSV exported from Kibana (Ole Magnus)
+# directed_links <-
+#   readr::read_csv2(
+#     "directed_links_2022.csv",
+#     #n_max = 10,
+#     col_select = c(
+#       id = '_id',
+#       #blocked,
+#       urban_ratio,
+#       end_traffic_node_id,
+#       start_traffic_node_id,
+#       #functional_road_class_info.highest,
+#       functional_class_low = functional_road_class_info.lowest,
+#       ferry = is_ferry_traffic_link,
+#       is_invalid,
+#       with_metering = is_traffic_with_metering_direction,
+#       #lane_info.has_only_public_transport_lanes,
+#       #lane_info.max_num_lanes,
+#       lanes_min = lane_info.min_num_lanes,
+#       length,
+#       county_ids = location.county_ids,
+#       adt_es = primary_trp.adt,
+#       #primary_trp.coverage,
+#       trp_id = primary_trp.trp_id,
+#       #primary_trp.trp_type,
+#       road_category,
+#       speed_low = speed_limit_info.lowest,
+#       speed_high = speed_limit_info.highest
+#     )
+#   )
+
+
+# From Kibana CSVs
+#tl_files <- list.files(pattern = "directed_tl*")
+
+# directed_links <-
+#   purrr::map(
+#     tl_files,
+#     ~ readr::read_csv2(file = .x, col_types = readr::cols(location.county_ids = "c"))
+#   ) |>
+#   purrr::list_rbind() |>
+#   dplyr::select(
+#     id = '_id',
+#     #functional_class_high = functional_road_class_info.highest,
+#     functional_class_low = functional_road_class_info.lowest,
+#     with_metering = is_traffic_with_metering_direction,
+#     length,
+#     county_ids = location.county_ids,
+#     #ferry = is_ferry_traffic_link,
+#     #directions = lanes_and_directions_info.direction_types,
+#     road_category,
+#     urban_ratio,
+#     #lanes_max = lane_info.max_num_lanes,
+#     lanes_min = lane_info.min_num_lanes,
+#     trp_id = primary_trp,
+#     speed_high = speed_limit_info.highest,
+#     speed_low = speed_limit_info.lowest,
+#     #blocked,
+#     #public_transport_only = lane_info.has_only_public_transport_lanes,
+#     #is_invalid,
+#     #invalid_reason
+#   )
+
+
+## Tidy links ----
 directed_links_tidy <-
   directed_links |>
+  dplyr::select(
+    id = '_id',
+    length = fields.length,
+    functional_class_low = fields.functional_road_class_info.lowest,
+    lanes_min = fields.lane_info.min_num_lanes,
+    #lanes_max = fields.lane_info.max_num_lanes,
+    urban_ratio = fields.urban_ratio,
+    ferry = fields.is_ferry_traffic_link,
+    #road_system_references = fields.road_system_references,
+    public_transport_only = fields.lane_info.has_only_public_transport_lanes,
+    #blocked = fields.blocked,
+    county_ids = fields.location.county_ids,
+    speed_high = fields.speed_limit_info.highest,
+    road_category = fields.road_category,
+    start_traffic_node_id = fields.start_traffic_node_id,
+    end_traffic_node_id = fields.end_traffic_node_id,
+    has_tourist_road = fields.has_tourist_road,
+    with_metering = fields.is_traffic_with_metering_direction,
+    invalid = fields.is_invalid,
+    trp_id = fields.primary_trp.trp_id
+  ) |>
+  #tidyr::unnest(length) |>
+  #tidyr::unnest(functional_class_low, keep_empty = TRUE) |>
+  #tidyr::unnest(lanes_min, keep_empty = TRUE) |>
+  tidyr::unnest(
+    cols = c(everything(), -county_ids),# -road_system_references),
+    keep_empty = TRUE
+  ) |>
+  tidyr::unnest(county_ids) |>
+  #tidyr::unnest(road_system_references) |>
+  #directed_links_tidy <-
+  #directed_links |>
   dplyr::mutate(
-    trp_id = stringr::str_replace(trp_id, "^-$", NA_character_),
+    #trp_id = stringr::str_replace(trp_id, "^-$", NA_character_),
     # Because of weirdness from Kibana:
-    dplyr::across(
+    #dplyr::across(
       #.cols = c(lanes_max, lanes_min, speed_high, speed_low),
-      .cols = c(lanes_min, speed_high, speed_low),
-      .fns = ~ stringr::str_replace(.x, ",0", "") |> as.numeric()
-    ),
-    county_ids = stringr::str_replace_all(county_ids, ",0", ""),
+    #  .cols = c(lanes_min, speed_high, speed_low, functional_class_low),
+    #  .fns = ~ stringr::str_replace(.x, ",0", "") |> as.numeric()
+    #),
+    #county_ids = stringr::str_replace_all(county_ids, ",0", ""),
+    #adt_es = stringr::str_replace(adt_es, ",", ".") |> as.numeric(),
     log_length_km = base::log(1 + length / 1e3)
   ) |>
   dplyr::mutate(
@@ -145,7 +251,7 @@ aadt_heading <-
   dplyr::filter(
     !(trp_id %in% c("54183V72689", "00916V704910", "02087V625292"))
   ) |>
-  # Romove non-existent directions
+  # Remove non-existent directions
   dplyr::filter(
     adt > 25
   ) |>
@@ -252,6 +358,7 @@ compare_link_and_aadt_distribution <-
 
 
 # Split training and validation set ----
+# TODO: make sure test set does not deplete training set of any particular combination of parameters
 # Need to combine all AADT with links first to check if
 # validation set will be a representative sample of the model variables.
 # Representative in comparison to:
@@ -486,7 +593,7 @@ simpel_model_results <-
   )
 
 plot(
-  simpel_model,
+  simpel_model_county,
   pages = 1,
   all.terms = TRUE,
   shade = TRUE,
@@ -513,37 +620,57 @@ gratia::draw(simpel_model, residuals = TRUE)
 
 # Predicting ----
 # The data frame with all links, to hold the predicted aadt
-directed_links_predicted_aadt <-
-  directed_links_tidy |>
-  dplyr::mutate(
-    year = "2022"
-  )
-
-directed_links_predicted_aadt_county <-
-  directed_links_tidy |>
-  dplyr::mutate(
-    year = "2022"
-  )
+# directed_links_predicted_aadt <-
+#   directed_links_tidy |>
+#   dplyr::mutate(
+#     year = "2022"
+#   ) |>
+#   dplyr::filter(
+#     !(lanes_min == 3 & functional_class_low == 3 & speed_high == 50)
+#   )
+#
+# directed_links_predicted_aadt_county <-
+#   directed_links_tidy |>
+#   dplyr::mutate(
+#     year = "2022"
+#   )
 
 # Predict
-directed_links_predicted_aadt$predicted_aadt <-
+aadt_and_link_test$predicted_aadt <-
   mgcv::predict.gam(
     simpel_model,
-    directed_links_predicted_aadt,
+    aadt_and_link_test,
     type = "response"
   ) |>
   base::floor()
 
-predicted_na <-
-  directed_links_predicted_aadt |>
-  dplyr::filter(
-    is.na(predicted_aadt)
-  )
 
-directed_links_predicted_aadt_county$predicted_aadt <-
+# directed_links_predicted_aadt$predicted_aadt <-
+#   mgcv::predict.gam(
+#     simpel_model,
+#     directed_links_predicted_aadt,
+#     type = "response"
+#   ) |>
+#   base::floor()
+#
+# predicted_na <-
+#   directed_links_predicted_aadt |>
+#   dplyr::filter(
+#     is.na(predicted_aadt)
+#   )
+
+# directed_links_predicted_aadt_county$predicted_aadt <-
+#   mgcv::predict.gam(
+#     simpel_model_county,
+#     directed_links_predicted_aadt_county,
+#     type = "response"
+#   ) |>
+#   base::floor()
+
+aadt_and_link_test$predicted_aadt_county <-
   mgcv::predict.gam(
     simpel_model_county,
-    directed_links_predicted_aadt_county,
+    aadt_and_link_test,
     type = "response"
   ) |>
   base::floor()
@@ -561,76 +688,85 @@ directed_links_predicted_aadt_county$predicted_aadt <-
 # 2. Comparing predicted AADT on non-TRP links with manual AADT.
 
 # 1
-aadt_compared <-
-  aadt_heading_test |>
-  dplyr::filter(
-    year == 2022,
-  ) |>
-  dplyr::select(
-    trp_id,
-    with_metering,
-    adt_true = adt
-  ) |>
-  dplyr::left_join(
-    directed_links_predicted_aadt,
-    by = dplyr::join_by(trp_id, with_metering)
-  ) |>
-  dplyr::select(
-    id,
-    trp_id,
-    with_metering,
-    county_id_single,
-    road_category,
-    lanes_min,
-    functional_class_low,
-    speed_high,
-    log_length_km,
-    urban_ratio,
-    adt_true,
-    predicted_aadt
-  ) |>
+# aadt_compared <-
+#   aadt_heading_test |>
+#   dplyr::filter(
+#     year == 2022,
+#   ) |>
+#   dplyr::select(
+#     trp_id,
+#     with_metering,
+#     adt_true = adt
+#   ) |>
+#   dplyr::left_join(
+#     directed_links_predicted_aadt,
+#     by = dplyr::join_by(trp_id, with_metering)
+#   ) |>
+#   dplyr::select(
+#     id,
+#     trp_id,
+#     with_metering,
+#     county_id_single,
+#     road_category,
+#     lanes_min,
+#     functional_class_low,
+#     speed_high,
+#     log_length_km,
+#     urban_ratio,
+#     adt_true,
+#     predicted_aadt
+#   ) |>
+#   dplyr::mutate(
+#     diff = abs(predicted_aadt - adt_true),
+#     diff_relative = abs(predicted_aadt - adt_true) / adt_true
+#   )
+
+aadt_and_link_test <-
+  aadt_and_link_test |>
   dplyr::mutate(
-    diff = abs(predicted_aadt - adt_true),
-    diff_relative = abs(predicted_aadt - adt_true) / adt_true
+    diff = abs(predicted_aadt - adt),
+    diff_relative = abs(predicted_aadt - adt) / adt,
+    diff_county = abs(predicted_aadt_county - adt),
+    diff_relative_county = abs(predicted_aadt_county - adt) / adt
   )
 
-sum_absolute_diff <- sum(aadt_compared$diff, na.rm = TRUE)
-mean_relative_diff <- mean(aadt_compared$diff_relative)
+sum_absolute_diff <- sum(aadt_and_link_test$diff, na.rm = TRUE)
+mean_relative_diff <- mean(aadt_and_link_test$diff_relative)
 
-aadt_compared_county <-
-  aadt_heading_test |>
-  dplyr::filter(
-    year == 2022,
-  ) |>
-  dplyr::select(
-    trp_id,
-    with_metering,
-    adt_true = adt
-  ) |>
-  dplyr::left_join(
-    directed_links_predicted_aadt_county,
-    by = dplyr::join_by(trp_id, with_metering)
-  ) |>
-  dplyr::select(
-    id,
-    trp_id,
-    with_metering,
-    county_id_single,
-    road_category,
-    lanes_min,
-    functional_class_low,
-    speed_high,
-    log_length_km,
-    urban_ratio,
-    adt_true,
-    predicted_aadt
-  ) |>
-  dplyr::mutate(
-    diff = abs(predicted_aadt - adt_true),
-    diff_relative = abs(predicted_aadt - adt_true) / adt_true
-  )
+# aadt_compared_county <-
+#   aadt_heading_test |>
+#   dplyr::filter(
+#     year == 2022,
+#   ) |>
+#   dplyr::select(
+#     trp_id,
+#     with_metering,
+#     adt_true = adt
+#   ) |>
+#   dplyr::left_join(
+#     directed_links_predicted_aadt_county,
+#     by = dplyr::join_by(trp_id, with_metering)
+#   ) |>
+#   dplyr::select(
+#     id,
+#     trp_id,
+#     with_metering,
+#     county_id_single,
+#     road_category,
+#     lanes_min,
+#     functional_class_low,
+#     speed_high,
+#     log_length_km,
+#     urban_ratio,
+#     adt_true,
+#     predicted_aadt
+#   ) |>
+#   dplyr::mutate(
+#     diff = abs(predicted_aadt - adt_true),
+#     diff_relative = abs(predicted_aadt - adt_true) / adt_true
+#   )
 
-sum_absolute_diff_county <- sum(aadt_compared_county$diff, na.rm = TRUE)
-mean_relative_diff_county <- mean(aadt_compared_county$diff_relative)
+sum_absolute_diff_county <- sum(aadt_and_link_test$diff_county, na.rm = TRUE)
+mean_relative_diff_county <- mean(aadt_and_link_test$diff_relative_county)
 
 # Model with county performs better!
